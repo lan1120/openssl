@@ -22,6 +22,7 @@
 #include <openssl/objects.h>
 #include <openssl/pem.h>
 #include <openssl/rsa.h>
+#include "openssl/asn1t.h"
 #ifndef OPENSSL_NO_DSA
 # include <openssl/dsa.h>
 #endif
@@ -38,6 +39,549 @@ static ASN1_INTEGER *x509_load_serial(const char *CAfile,
                                       const char *serialfile, int create);
 static int purpose_print(BIO *bio, X509 *cert, X509_PURPOSE *pt);
 static int print_x509v3_exts(BIO *bio, X509 *x, const char *ext_names);
+
+typedef struct {
+    ASN1_INTEGER *securityLevel;
+    ASN1_OBJECT *attestType;
+    ASN1_OCTET_STRING *value;
+} HmAttestationClaim;
+
+ASN1_SEQUENCE(HmAttestationClaim) = {
+    ASN1_SIMPLE(HmAttestationClaim, securityLevel, ASN1_INTEGER),
+    ASN1_SIMPLE(HmAttestationClaim, attestType, ASN1_OBJECT),
+    ASN1_SIMPLE(HmAttestationClaim, value, ASN1_OCTET_STRING), // ASN1_OCTET_STRING
+} ASN1_SEQUENCE_END(HmAttestationClaim)
+
+IMPLEMENT_ASN1_FUNCTIONS(HmAttestationClaim)
+
+typedef struct AttestationDeviceID {
+    ASN1_INTEGER *id;
+    HmAttestationClaim *deviceID1;
+    HmAttestationClaim *deviceID2;
+} AttestationDeviceID;
+
+ASN1_SEQUENCE(AttestationDeviceID) = {
+    ASN1_SIMPLE(AttestationDeviceID, id, ASN1_INTEGER),
+    ASN1_SIMPLE(AttestationDeviceID, deviceID1, HmAttestationClaim),
+    ASN1_SIMPLE(AttestationDeviceID, deviceID2, HmAttestationClaim),
+} ASN1_SEQUENCE_END(AttestationDeviceID)
+
+IMPLEMENT_ASN1_FUNCTIONS(AttestationDeviceID)
+
+// /* Add extensions */
+static void my_add_extensions_device_id(X509 *new)
+{
+    int device_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.1.5", "DEVICE ID", "device id");
+    printf("OBJ_create device_nid: %d\n", device_nid);
+
+    int device_nid1 = OBJ_create("1.3.6.1.4.1.2011.2.376.1.5.1", "DEVICE ID 1", "device id 1");
+    printf("OBJ_create device_nid1: %d\n", device_nid1);
+
+    int device_nid2 = OBJ_create("1.3.6.1.4.1.2011.2.376.1.5.2", "DEVICE ID 2", "device id 2");
+    printf("OBJ_create device_nid2: %d\n", device_nid2);
+
+    AttestationDeviceID *attestationDeviceID = AttestationDeviceID_new();
+    attestationDeviceID->id = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(attestationDeviceID->id, 1);
+    attestationDeviceID->deviceID1 = HmAttestationClaim_new();
+    attestationDeviceID->deviceID1->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(attestationDeviceID->deviceID1->securityLevel, 1);
+    attestationDeviceID->deviceID1->attestType = OBJ_nid2obj(device_nid1);
+    attestationDeviceID->deviceID1->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(attestationDeviceID->deviceID1->value, "123456789001", 12);
+
+    attestationDeviceID->deviceID2 = HmAttestationClaim_new();
+    attestationDeviceID->deviceID2->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(attestationDeviceID->deviceID2->securityLevel, 1);
+    attestationDeviceID->deviceID2->attestType = OBJ_nid2obj(device_nid2);
+    attestationDeviceID->deviceID2->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(attestationDeviceID->deviceID2->value, "123456789002", 12);
+
+    unsigned char *der = NULL;
+    int der_len = 0;
+    der_len = i2d_AttestationDeviceID(attestationDeviceID, &der);
+
+    ASN1_OCTET_STRING *data = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(data, der, der_len);
+    X509_EXTENSION *ext = X509_EXTENSION_create_by_NID(NULL, device_nid, 0, data);
+    X509_add_ext(new, ext, -1);
+}
+
+typedef struct {
+    ASN1_INTEGER *version;
+    ASN1_ENUMERATED *level;
+} HmDeviceSecurityLevel;
+
+ASN1_SEQUENCE(HmDeviceSecurityLevel) = {
+    ASN1_SIMPLE(HmDeviceSecurityLevel, version, ASN1_INTEGER),
+    ASN1_SIMPLE(HmDeviceSecurityLevel, level, ASN1_ENUMERATED),
+} ASN1_SEQUENCE_END(HmDeviceSecurityLevel)
+
+IMPLEMENT_ASN1_FUNCTIONS(HmDeviceSecurityLevel)
+
+static void my_add_extensions_device_level(X509 *new)
+{
+    int device_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.1.1", "DEVICE LEVEL", "device level");
+    printf("OBJ_create device_nid: %d\n", device_nid);
+
+    HmDeviceSecurityLevel *deviceSecurityLevel = HmDeviceSecurityLevel_new();
+    deviceSecurityLevel->version = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(deviceSecurityLevel->version, 1);
+    deviceSecurityLevel->level = ASN1_ENUMERATED_new();
+    ASN1_ENUMERATED_set(deviceSecurityLevel->level, 90);
+    unsigned char *der = NULL;
+    int der_len = 0;
+    der_len = i2d_HmDeviceSecurityLevel(deviceSecurityLevel, &der);
+    ASN1_OCTET_STRING *data = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(data, der, der_len);
+    X509_EXTENSION *ext = X509_EXTENSION_create_by_NID(NULL, device_nid, 0, data);
+    X509_add_ext(new, ext, -1);
+}
+
+#define ID_HUAWEI_PKI 0x2B, 0x06, 0x01, 0x04, 0x1, 0x8F, 0x5B, 0x02, 0x82, 0x78
+
+// 1.3.6.1.4.1.2011.2.376.1
+#define ID_HUAWEI_PKI_CERT_EXT ID_HUAWEI_PKI, 0x01
+
+// 1.3.6.1.4.1.2011.2.376.1.1
+#define ID_HUAWEI_DEVICE_SECURITY_LEVEL_EXTENSION ID_HUAWEI_PKI_CERT_EXT, 0x01
+
+// 1.3.6.1.4.1.2011.2.376.1.3
+#define ID_HUAWEI_ATTESTATION_EXTENSION ID_HUAWEI_PKI_CERT_EXT, 0x03
+
+// 1.3.6.1.4.1.2011.2.376.1.5
+#define ID_HUAWEI_DEVICE_ACTIVATION_EXTENSION ID_HUAWEI_PKI_CERT_EXT, 0x05
+
+// 1.3.6.1.4.1.2011.2.376.2.5.1
+#define ID_HUAWEI_DEVICE_ACTIVATION_DEVICE_ID1 ID_HUAWEI_DEVICE_ACTIVATION_EXTENSION, 0x01
+
+// 1.3.6.1.4.1.2011.2.376.2.5.2
+#define ID_HUAWEI_DEVICE_ACTIVATION_DEVICE_ID2 ID_HUAWEI_DEVICE_ACTIVATION_EXTENSION, 0x02
+
+// 1.3.6.1.4.1.2011.2.376.2
+#define ID_HUAWEI_ATTESTATION_BASE      ID_HUAWEI_PKI, 0x02
+
+// 1.3.6.1.4.1.2011.2.376.2.1
+#define ID_KEY_PROPERTIES               ID_HUAWEI_ATTESTATION_BASE, 0x01
+
+// 1.3.6.1.4.1.2011.2.376.2.2
+#define ID_SYSTEM_PROPERTIES            ID_HUAWEI_ATTESTATION_BASE, 0x02
+
+// ID_KEY_PROPERTIES
+// 1.3.6.1.4.1.2011.2.376.2.1.1
+#define ID_KEY_PROPERTY_KEY_PURPOSE  ID_KEY_PROPERTIES, 0x01
+
+// 1.3.6.1.4.1.2011.2.376.2.1.2
+#define ID_KEY_PROPERTY_KEY_ID ID_KEY_PROPERTIES, 0x02
+
+// 1.3.6.1.4.1.2011.2.376.2.1.3
+#define ID_KEY_PROPERTY_APP_ID ID_KEY_PROPERTIES, 0x03
+
+// 1.3.6.1.4.1.2011.2.376.2.1.3.1
+#define ID_KEY_PROPERTY_APP_ID_HAP_ID ID_KEY_PROPERTY_APP_ID, 0x01
+
+// 1.3.6.1.4.1.2011.2.376.2.1.3.2
+#define ID_KEY_PROPERTY_APP_ID_SA_ID ID_KEY_PROPERTY_APP_ID, 0x02
+
+// 1.3.6.1.4.1.2011.2.376.2.1.3.3
+#define ID_KEY_PROPERTY_APP_ID_UNIFIED_ID ID_KEY_PROPERTY_APP_ID, 0x03
+
+// 1.3.6.1.4.1.2011.2.376.2.1.4
+#define ID_KEY_PROPERTY_CHALLENGE ID_KEY_PROPERTIES, 0x04
+
+// 1.3.6.1.4.1.2011.2.376.2.1.5
+#define ID_KEY_PROPERTY_KEY_FLAG ID_KEY_PROPERTIES, 0x05
+
+// 1.3.6.1.4.1.2011.2.376.2.1.8
+#define ID_KEY_PROPERTY_DIGEST ID_KEY_PROPERTIES, 0x08
+
+// 1.3.6.1.4.1.2011.2.376.2.1.9
+#define ID_KEY_PROPERTY_SIGN_PADDING ID_KEY_PROPERTIES, 0x09
+
+// 1.3.6.1.4.1.2011.2.376.2.1.10
+#define ID_KEY_PROPERTY_ENC_PADDING ID_KEY_PROPERTIES, 0x0A
+
+// 1.3.6.1.4.1.2011.2.376.2.1.11
+#define ID_KEY_PROPERTY_SIGN_TYPE ID_KEY_PROPERTIES, 0x0B
+
+// ID_SYSTEM_PROPERTIES
+// 1.3.6.1.4.1.2011.2.376.2.2.2
+#define ID_SYSTEM_PROPERTIES_OS ID_SYSTEM_PROPERTIES, 0x02
+
+// 1.3.6.1.4.1.2011.2.376.2.2.2.4
+#define ID_SYSTEM_PROPERTIES_OS_VERSION_INFO ID_SYSTEM_PROPERTIES_OS, 0x04
+
+// 1.3.6.1.4.1.2011.2.376.2.2.2.5
+#define ID_SYSTEM_PROPERTIES_OS_SEC_LEVEL_INFO ID_SYSTEM_PROPERTIES_OS, 0x05
+
+// 1.3.6.1.4.1.2011.2.376.2.2.2.6
+#define ID_SYSTEM_PROPERTIES_OS_KEY_MANAGER_TA_ID ID_SYSTEM_PROPERTIES_OS, 0x06
+
+// 1.3.6.1.4.1.2011.2.376.2.2.2.7
+#define ID_SYSTEM_PROPERTIES_OS_PURPOSE ID_SYSTEM_PROPERTIES_OS, 0x07
+
+// 1.3.6.1.4.1.2011.2.376.2.2.2.8
+#define ID_SYSTEM_PROPERTIES_OS_ID_PADDING_FLAG ID_SYSTEM_PROPERTIES_OS, 0x08
+
+// 1.3.6.1.4.1.2011.2.376.2.2.2.9
+#define ID_SYSTEM_PROPERTIES_OS_NONCE ID_SYSTEM_PROPERTIES_OS, 0x09
+
+// 1.3.6.1.4.1.2011.2.376.2.2.4
+#define ID_PRIVACY_PROPERTIES ID_SYSTEM_PROPERTIES, 0x04
+
+// 1.3.6.1.4.1.2011.2.376.2.2.4.1
+#define ID_PRIVACY_PROPERTIES_IMEI ID_PRIVACY_PROPERTIES, 0x01
+
+// 1.3.6.1.4.1.2011.2.376.2.2.4.2
+#define ID_PRIVACY_PROPERTIES_MEID ID_PRIVACY_PROPERTIES, 0x02
+
+// 1.3.6.1.4.1.2011.2.376.2.2.4.3
+#define ID_PRIVACY_PROPERTIES_SERIAL ID_PRIVACY_PROPERTIES, 0x03
+
+// 1.3.6.1.4.1.2011.2.376.2.2.4.4
+#define ID_PRIVACY_PROPERTIES_BRAND ID_PRIVACY_PROPERTIES, 0x04
+
+// 1.3.6.1.4.1.2011.2.376.2.2.4.5
+#define ID_PRIVACY_PROPERTIES_DEVICE ID_PRIVACY_PROPERTIES, 0x05
+
+// 1.3.6.1.4.1.2011.2.376.2.2.4.6
+#define ID_PRIVACY_PROPERTIES_PRODUCT ID_PRIVACY_PROPERTIES, 0x06
+
+// 1.3.6.1.4.1.2011.2.376.2.2.4.7
+#define ID_PRIVACY_PROPERTIES_MANUFACTURER ID_PRIVACY_PROPERTIES, 0x07
+
+// 1.3.6.1.4.1.2011.2.376.2.2.4.8
+#define ID_PRIVACY_PROPERTIES_MODEL ID_PRIVACY_PROPERTIES, 0x08
+
+// 1.3.6.1.4.1.2011.2.376.2.2.4.9
+#define ID_PRIVACY_PROPERTIES_SOCID ID_PRIVACY_PROPERTIES, 0x09
+
+// 1.3.6.1.4.1.2011.2.376.2.2.4.10
+#define ID_PRIVACY_PROPERTIES_UDID ID_PRIVACY_PROPERTIES, 0x0A
+
+typedef struct {
+    ASN1_INTEGER *securityLevel;
+    ASN1_OBJECT *attestType;
+    ASN1_INTEGER *value;
+} HmAttestationClaim_int;
+
+ASN1_SEQUENCE(HmAttestationClaim_int) = {
+    ASN1_SIMPLE(HmAttestationClaim_int, securityLevel, ASN1_INTEGER),
+    ASN1_SIMPLE(HmAttestationClaim_int, attestType, ASN1_OBJECT),
+    ASN1_SIMPLE(HmAttestationClaim_int, value, ASN1_INTEGER),
+} ASN1_SEQUENCE_END(HmAttestationClaim_int)
+
+IMPLEMENT_ASN1_FUNCTIONS(HmAttestationClaim_int)
+
+typedef struct {
+    ASN1_INTEGER *securityLevel;
+    ASN1_OBJECT *attestType;
+    ASN1_BOOLEAN value;
+} HmAttestationClaim_bool;
+
+ASN1_SEQUENCE(HmAttestationClaim_bool) = {
+    ASN1_SIMPLE(HmAttestationClaim_int, securityLevel, ASN1_INTEGER),
+    ASN1_SIMPLE(HmAttestationClaim_int, attestType, ASN1_OBJECT),
+    ASN1_SIMPLE(HmAttestationClaim_int, value, ASN1_BOOLEAN),
+} ASN1_SEQUENCE_END(HmAttestationClaim_bool)
+
+IMPLEMENT_ASN1_FUNCTIONS(HmAttestationClaim_bool)
+
+typedef struct AttestationHm {
+    ASN1_INTEGER *id;
+    HmAttestationClaim *key_purpose;
+    HmAttestationClaim *appID;
+    HmAttestationClaim *chanllenge;
+    HmAttestationClaim *key_flag;
+    HmAttestationClaim *digest;
+    HmAttestationClaim *sign_padding;
+    HmAttestationClaim *enc_padding;
+    HmAttestationClaim *sign_type;
+    HmAttestationClaim *version_info;
+    HmAttestationClaim *key_manager_ta_id;
+    HmAttestationClaim_int *purpose;
+    HmAttestationClaim_bool *id_padding_flag;
+    HmAttestationClaim *nonce;
+    HmAttestationClaim *imei;
+    HmAttestationClaim *meid;
+    HmAttestationClaim *serial;
+    HmAttestationClaim *model;
+    HmAttestationClaim *socid;
+    HmAttestationClaim *udid;
+} AttestationHm;
+
+ASN1_SEQUENCE(AttestationHm) = {
+    ASN1_SIMPLE(AttestationHm, id, ASN1_INTEGER),
+    ASN1_OPT(AttestationHm, key_purpose, HmAttestationClaim),
+    ASN1_OPT(AttestationHm, appID, HmAttestationClaim),
+    ASN1_OPT(AttestationHm, chanllenge, HmAttestationClaim),
+    ASN1_OPT(AttestationHm, key_flag, HmAttestationClaim),
+    ASN1_OPT(AttestationHm, digest, HmAttestationClaim),
+    ASN1_OPT(AttestationHm, sign_padding, HmAttestationClaim),
+    ASN1_OPT(AttestationHm, enc_padding, HmAttestationClaim),
+    ASN1_OPT(AttestationHm, sign_type, HmAttestationClaim),
+    ASN1_OPT(AttestationHm, version_info, HmAttestationClaim),
+    ASN1_OPT(AttestationHm, key_manager_ta_id, HmAttestationClaim),
+    ASN1_OPT(AttestationHm, purpose, HmAttestationClaim_int),
+    ASN1_OPT(AttestationHm, id_padding_flag, HmAttestationClaim_bool),
+    ASN1_OPT(AttestationHm, nonce, HmAttestationClaim),
+    ASN1_OPT(AttestationHm, imei, HmAttestationClaim),
+    ASN1_OPT(AttestationHm, meid, HmAttestationClaim),
+    ASN1_OPT(AttestationHm, serial, HmAttestationClaim),
+    ASN1_OPT(AttestationHm, model, HmAttestationClaim),
+    ASN1_OPT(AttestationHm, socid, HmAttestationClaim),
+    ASN1_OPT(AttestationHm, udid, HmAttestationClaim),
+} ASN1_SEQUENCE_END(AttestationHm)
+IMPLEMENT_ASN1_FUNCTIONS(AttestationHm)
+
+typedef struct {
+    ASN1_OBJECT *type;
+    ASN1_OCTET_STRING *value;
+} HmApplicationIdType;
+ASN1_SEQUENCE(HmApplicationIdType) = {
+    ASN1_SIMPLE(HmApplicationIdType, type, ASN1_OBJECT),
+    ASN1_SIMPLE(HmApplicationIdType, value, ASN1_OCTET_STRING),
+} ASN1_SEQUENCE_END(HmApplicationIdType)
+IMPLEMENT_ASN1_FUNCTIONS(HmApplicationIdType)
+
+static void my_add_extensions_attestation_hm(X509 *new)
+{
+    int attestation_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.1.3", "attestation", "attestation");
+    printf("OBJ_create attestation_nid: %d\n", attestation_nid);
+
+    int key_purpose_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.1.1", "key_purpose", "key_purpose");
+    printf("OBJ_create key_purpose_nid: %d\n", key_purpose_nid);
+
+    int appID_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.1.3", "appID", "appID");
+    printf("OBJ_create appID_nid: %d\n", appID_nid);
+    int appID_hap_id_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.1.3.1", "appID_hapID", "appID_hapID");
+    printf("OBJ_create appID_hap_id_nid: %d\n", appID_nid);
+    int appID_sa_id_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.1.3.2", "appID_saID", "appID_saID");
+    printf("OBJ_create appID_sa_id_nid: %d\n", appID_sa_id_nid);
+    int appID_unifide_id_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.1.3.3", "appID_unifideID", "appID_unifideID");
+    printf("OBJ_create appID_unifide_id_nid: %d\n", appID_unifide_id_nid);
+
+    int challenge_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.1.4", "chanllenge", "chanllenge");
+    printf("OBJ_create challenge_nid: %d\n", challenge_nid);
+    int key_flag_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.1.5", "key_flag", "key_flag");
+    printf("OBJ_create key_flag_nid: %d\n", key_flag_nid);
+    int digest_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.1.8", "digest", "digest");
+    printf("OBJ_create digest_nid: %d\n", digest_nid);
+    int sign_padding_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.1.9", "sign_padding", "sign_padding");
+    printf("OBJ_create sign_padding_nid: %d\n", sign_padding_nid);
+    int enc_padding_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.1.10", "enc_padding", "enc_padding");
+    printf("OBJ_create enc_padding_nid: %d\n", enc_padding_nid);
+    int sign_type_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.1.11", "sign_type", "sign_type");
+    printf("OBJ_create sign_type_nid: %d\n", sign_type_nid);
+    int version_info_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.2.2.4", "version_info", "version_info");
+    printf("OBJ_create version_info_nid: %d\n", version_info_nid);
+    int key_manager_ta_id_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.2.2.6", "key_manager_ta_id", "key_manager_ta_id");
+    printf("OBJ_create key_manager_ta_id_nid: %d\n", key_manager_ta_id_nid);
+    int purpose_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.2.2.7", "purpose", "purpose");
+    printf("OBJ_create purpose_nid: %d\n", purpose_nid);
+    int id_padding_flag_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.2.2.8", "id_padding_flag", "id_padding_flag");
+    printf("OBJ_create id_padding_flag_nid: %d\n", id_padding_flag_nid);
+    int nonce_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.2.2.9", "nonce", "nonce");
+    printf("OBJ_create nonce_nid: %d\n", nonce_nid);
+    int imei_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.2.4.1", "imei", "imei");
+    printf("OBJ_create imei_nid: %d\n", imei_nid);
+    int meid_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.2.4.2", "meid", "meid");
+    printf("OBJ_create meid_nid: %d\n", meid_nid);
+    int serial_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.2.4.3", "serial", "serial");
+    printf("OBJ_create serial_nid: %d\n", serial_nid);
+    int model_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.2.4.8", "model", "model");
+    printf("OBJ_create model_nid: %d\n", model_nid);
+    int socid_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.2.4.9", "socid", "socid");
+    printf("OBJ_create socid_nid: %d\n", socid_nid);
+    int udid_nid = OBJ_create("1.3.6.1.4.1.2011.2.376.2.2.4.10", "udid", "udid");
+    printf("OBJ_create udid_nid: %d\n", udid_nid);
+
+    AttestationHm *attestationHm = AttestationHm_new();
+    attestationHm->id = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(attestationHm->id, 0x01);
+
+    HmAttestationClaim *key_purpose = HmAttestationClaim_new();
+    key_purpose->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(key_purpose->securityLevel, 0x01);
+    key_purpose->attestType = OBJ_nid2obj(key_purpose_nid);
+    key_purpose->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(key_purpose->value, "key_purpose", strlen("key_purpose"));
+    attestationHm->key_purpose = key_purpose;
+
+    HmAttestationClaim *appID = HmAttestationClaim_new();
+    appID->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(appID->securityLevel, 0x01);
+    appID->attestType = OBJ_nid2obj(appID_nid);
+    appID->value = ASN1_OCTET_STRING_new();
+    HmApplicationIdType *appIDType = HmApplicationIdType_new();
+    appIDType->type = OBJ_nid2obj(appID_hap_id_nid);
+    appIDType->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(appIDType->value, "appID_hap_id", strlen("appID_hap_id"));
+    unsigned char *appIdData = NULL;
+    int appIdDataLen = 0;
+    appIdDataLen = i2d_HmApplicationIdType(appIDType, &appIdData);
+    ASN1_OCTET_STRING_set(appID->value, appIdData, appIdDataLen);
+    attestationHm->appID = appID;
+
+    HmAttestationClaim *chanllenge = HmAttestationClaim_new();
+    chanllenge->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(chanllenge->securityLevel, 0x01);
+    chanllenge->attestType = OBJ_nid2obj(challenge_nid);
+    chanllenge->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(chanllenge->value, "chanllenge", strlen("chanllenge"));
+    attestationHm->chanllenge = chanllenge;
+
+    HmAttestationClaim *key_flag = HmAttestationClaim_new();
+    key_flag->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(key_flag->securityLevel, 0x01);
+    key_flag->attestType = OBJ_nid2obj(key_flag_nid);
+    key_flag->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(key_flag->value, "key_flag", strlen("key_flag"));
+    attestationHm->key_flag = key_flag;
+
+    HmAttestationClaim *digest = HmAttestationClaim_new();
+    digest->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(digest->securityLevel, 0x01);
+    digest->attestType = OBJ_nid2obj(digest_nid);
+    digest->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(digest->value, "digest", strlen("digest"));
+    attestationHm->digest = digest;
+
+    HmAttestationClaim *sign_padding = HmAttestationClaim_new();
+    sign_padding->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(sign_padding->securityLevel, 0x01);
+    sign_padding->attestType = OBJ_nid2obj(sign_padding_nid);
+    sign_padding->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(sign_padding->value, "sign_padding", strlen("sign_padding"));
+    attestationHm->sign_padding = sign_padding;
+
+    HmAttestationClaim *enc_padding = HmAttestationClaim_new();
+    enc_padding->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(enc_padding->securityLevel, 0x01);
+    enc_padding->attestType = OBJ_nid2obj(enc_padding_nid);
+    enc_padding->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(enc_padding->value, "enc_padding", strlen("enc_padding"));
+    attestationHm->enc_padding = enc_padding;
+
+    HmAttestationClaim *sign_type = HmAttestationClaim_new();
+    sign_type->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(sign_type->securityLevel, 0x01);
+    sign_type->attestType = OBJ_nid2obj(sign_type_nid);
+    sign_type->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(sign_type->value, "sign_type", strlen("sign_type"));
+    attestationHm->sign_type = sign_type;
+
+    HmAttestationClaim *version_info = HmAttestationClaim_new();
+    version_info->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(version_info->securityLevel, 0x01);
+    version_info->attestType = OBJ_nid2obj(version_info_nid);
+    version_info->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(version_info->value, "version_info", strlen("version_info"));
+    attestationHm->version_info = version_info;
+
+    HmAttestationClaim *key_manager_ta_id = HmAttestationClaim_new();
+    key_manager_ta_id->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(key_manager_ta_id->securityLevel, 0x01);
+    key_manager_ta_id->attestType = OBJ_nid2obj(key_manager_ta_id_nid);
+    key_manager_ta_id->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(key_manager_ta_id->value, "key_manager_ta_id", strlen("key_manager_ta_id"));
+    attestationHm->key_manager_ta_id = key_manager_ta_id;
+
+    HmAttestationClaim_int *purpose = HmAttestationClaim_int_new();
+    purpose->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(purpose->securityLevel, 0x01);
+    purpose->attestType = OBJ_nid2obj(purpose_nid);
+    purpose->value = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(purpose->value, 0x01);
+    attestationHm->purpose = purpose;
+
+    HmAttestationClaim_bool *id_padding_flag = HmAttestationClaim_bool_new();
+    id_padding_flag->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(id_padding_flag->securityLevel, 0x01);
+    id_padding_flag->attestType = OBJ_nid2obj(id_padding_flag_nid);
+    id_padding_flag->value = 0;
+    attestationHm->id_padding_flag = id_padding_flag;
+
+    HmAttestationClaim *nonce = HmAttestationClaim_new();
+    nonce->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(nonce->securityLevel, 0x01);
+    nonce->attestType = OBJ_nid2obj(nonce_nid);
+    nonce->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(nonce->value, "nonce", strlen("nonce"));
+    attestationHm->nonce = nonce;
+
+    HmAttestationClaim *imei = HmAttestationClaim_new();
+    imei->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(imei->securityLevel, 0x01);
+    imei->attestType = OBJ_nid2obj(imei_nid);
+    imei->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(imei->value, "imei", strlen("imei"));
+    attestationHm->imei = imei;
+
+    HmAttestationClaim *meid = HmAttestationClaim_new();
+    meid->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(meid->securityLevel, 0x01);
+    meid->attestType = OBJ_nid2obj(meid_nid);
+    meid->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(meid->value, "meid", strlen("meid"));
+    attestationHm->meid = meid;
+
+    HmAttestationClaim *serial = HmAttestationClaim_new();
+    serial->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(serial->securityLevel, 0x01);
+    serial->attestType = OBJ_nid2obj(serial_nid);
+    serial->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(serial->value, "serial", strlen("serial"));
+    attestationHm->serial = serial;
+
+    HmAttestationClaim *model = HmAttestationClaim_new();
+    model->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(model->securityLevel, 0x01);
+    model->attestType = OBJ_nid2obj(model_nid);
+    model->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(model->value, "model", strlen("model"));
+    attestationHm->model = model;
+
+    HmAttestationClaim *socid = HmAttestationClaim_new();
+    socid->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(socid->securityLevel, 0x01);
+    socid->attestType = OBJ_nid2obj(socid_nid);
+    socid->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(socid->value, "socid", strlen("socid"));
+    attestationHm->socid = socid;
+
+    HmAttestationClaim *udid = HmAttestationClaim_new();
+    udid->securityLevel = ASN1_INTEGER_new();
+    ASN1_INTEGER_set(udid->securityLevel, 0x01);
+    udid->attestType = OBJ_nid2obj(udid_nid);
+    udid->value = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(udid->value, "udid", strlen("udid"));
+    attestationHm->udid = udid;
+
+    ERR_clear_error();
+
+    unsigned char *der = NULL;
+    int der_len = 0;
+    ERR_clear_error();
+    der_len = i2d_AttestationHm(attestationHm, &der);
+    printf("der_len: %d\n", der_len);
+    if (der_len < 0) {
+        printf("i2d_AttestationHm failed\n");
+        ERR_print_errors_fp(stderr);
+        return -1;
+    }
+    ASN1_OCTET_STRING *data = ASN1_OCTET_STRING_new();
+    ASN1_OCTET_STRING_set(data, der, der_len);
+    X509_EXTENSION *ext = X509_EXTENSION_create_by_NID(NULL, attestation_nid, 0, data);
+    X509_add_ext(new, ext, -1);
+}
+
+static void my_add_extensions(X509 *new)
+{
+    my_add_extensions_device_id(new);
+    my_add_extensions_device_level(new);
+    // my_add_extensions_attestation_hm(new);
+}
 
 typedef enum OPTION_choice {
     OPT_COMMON,
@@ -802,7 +1346,7 @@ int x509_main(int argc, char **argv)
                             privkey != NULL ? privkey :
                             X509_REQ_get0_pubkey(req)))
         goto end;
-
+    my_add_extensions(x);
     if (CAfile != NULL) {
         xca = load_cert_pass(CAfile, CAformat, 1, passin, "CA certificate");
         if (xca == NULL)
