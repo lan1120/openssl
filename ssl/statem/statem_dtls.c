@@ -813,6 +813,72 @@ static int dtls1_process_out_of_seq_message(SSL_CONNECTION *s,
     return 0;
 }
 
+static int dtls_expect_ccs(SSL_CONNECTION *s)
+{
+    if (s->server) {
+        switch (s->statem.hand_state) {
+            case TLS_ST_SR_CERT_VRFY:
+                return 1;
+            case TLS_ST_SR_KEY_EXCH:
+                if ((s->session->peer_rpk == NULL
+                     && s->session->peer == NULL)
+                    || s->statem.no_cert_verify) {
+                        return 1;
+                    }
+                return 0;
+            case TLS_ST_SW_FINISHED:
+                return 1;
+            default:
+                return 0;
+        }
+    } else {
+        switch (s->statem.hand_state) {
+            case TLS_ST_CR_SESSION_TICKET:
+                return 1;
+            case TLS_ST_CW_FINISHED:
+                if (!s->ext.ticket_expected) {
+                    return 1;
+                }
+                return 0;
+            case TLS_ST_CR_SRVR_HELLO:
+                if (s->hit) {
+                    if (!s->ext.ticket_expected) {
+                        return 1;
+                    }
+                } else {
+                    if (s->ext.session_secret_cb != NULL
+                        && s->session->ext.tick != NULL) {
+                        return 1;
+                    }
+                }
+                return 0;
+            default:
+                return 0;
+        }
+    }
+    return 1;
+}
+
+static int dtls_get_cached_ccs(SSL_CONNECTION *s)
+{
+    if (s->d1->ccs_data_len == 0) {
+        return 0;
+    }
+
+    memcpy(s->init_buf->data, s->d1->ccs_data, s->d1->ccs_data_len);
+    s->init_num = s->d1->ccs_data_len - 1;
+    s->init_msg = s->init_buf->data + 1;
+    s->s3.tmp.message_type = SSL3_MT_CHANGE_CIPHER_SPEC;
+    s->s3.tmp.message_size = s->d1->ccs_data_len - 1;
+    return 1;
+}
+
+static void dtls_cache_ccs(SSL_CONNECTION *s, uint8_t *data, size_t len)
+{
+    memcpy(s->d1->ccs_data, data, len);
+    s->d1->ccs_data_len = len;
+}
+
 static int dtls_get_reassembled_message(SSL_CONNECTION *s, int *errtype,
                                         size_t *len)
 {
@@ -829,6 +895,12 @@ static int dtls_get_reassembled_message(SSL_CONNECTION *s, int *errtype,
     *errtype = 0;
 
     p = (unsigned char *)s->init_buf->data;
+
+    if (dtls_expect_ccs(s) == 1) {
+        if (dtls_get_cached_ccs(s) == 1) {
+            return 1;
+        }
+    }
 
  redo:
     /* see if we have the required fragment already */
@@ -856,6 +928,11 @@ static int dtls_get_reassembled_message(SSL_CONNECTION *s, int *errtype,
             SSLfatal(s, SSL_AD_UNEXPECTED_MESSAGE,
                      SSL_R_BAD_CHANGE_CIPHER_SPEC);
             goto f_err;
+        }
+
+        if (dtls_expect_ccs(s) != 1) {
+            dtls_cache_ccs(s, p, readbytes);
+            goto redo;
         }
 
         s->init_num = readbytes - 1;

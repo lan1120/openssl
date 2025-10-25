@@ -1983,6 +1983,9 @@ typedef struct dtls1_state_st {
 
     DTLS_timer_cb timer_cb;
 
+    size_t ccs_data_len;
+    unsigned char ccs_data[DTLS1_HM_HEADER_LENGTH];
+
 } DTLS1_STATE;
 
 /*
